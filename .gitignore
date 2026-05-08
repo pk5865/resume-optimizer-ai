@@ -1,0 +1,23 @@
+node_modules
+dist
+.env
+
+
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# Uploads
+backend/uploads/
+backend/generated/
+
+# Node
+frontend/node_modules/
+
+# Env
+.env
+
+# OS
+.DS_Store
+Thumbs.db
