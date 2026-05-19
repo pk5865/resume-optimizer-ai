@@ -29,6 +29,7 @@ DB_PATH = os.path.join(BASE_DIR, "app.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 URL_RE = re.compile(r"(https?://[^\s<>\"]+)")
 MAX_PDF_PAGES = 1
+DB_INIT_ERROR = None
 
 COMMON_SKILLS = [
     "python", "java", "javascript", "typescript", "html", "css", "sql",
@@ -118,7 +119,12 @@ def get_db():
     if DATABASE_URL:
         if psycopg2 is None:
             raise RuntimeError("psycopg2 is required when DATABASE_URL is set")
-        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        try:
+            return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=10)
+        except Exception:
+            # Fall back to local SQLite so the service can still boot if the
+            # hosted database connection is misconfigured during deploy.
+            pass
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -143,49 +149,98 @@ def migrate_db(conn):
 
 
 def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS resumes (
-            id TEXT PRIMARY KEY,
-            filename TEXT NOT NULL,
-            raw_text TEXT NOT NULL,
-            created_at TEXT NOT NULL
+    global DB_INIT_ERROR
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resumes (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyses (
-            id TEXT PRIMARY KEY,
-            resume_id TEXT NOT NULL,
-            job_description TEXT NOT NULL,
-            match_score INTEGER NOT NULL,
-            matched_keywords TEXT NOT NULL,
-            missing_keywords TEXT NOT NULL,
-            approved_additions TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (resume_id) REFERENCES resumes (id)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analyses (
+                id TEXT PRIMARY KEY,
+                resume_id TEXT NOT NULL,
+                job_description TEXT NOT NULL,
+                match_score INTEGER NOT NULL,
+                matched_keywords TEXT NOT NULL,
+                missing_keywords TEXT NOT NULL,
+                approved_additions TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (resume_id) REFERENCES resumes (id)
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS generated_files (
-            id TEXT PRIMARY KEY,
-            resume_id TEXT NOT NULL,
-            file_type TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            generated_text TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (resume_id) REFERENCES resumes (id)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS generated_files (
+                id TEXT PRIMARY KEY,
+                resume_id TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                generated_text TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (resume_id) REFERENCES resumes (id)
+            )
+            """
         )
-        """
-    )
-    migrate_db(conn)
-    conn.commit()
-    conn.close()
+        migrate_db(conn)
+        conn.commit()
+        conn.close()
+        DB_INIT_ERROR = None
+    except Exception as exc:
+        DB_INIT_ERROR = str(exc)
+        fallback = sqlite3.connect(DB_PATH)
+        fallback.row_factory = sqlite3.Row
+        cur = fallback.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resumes (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analyses (
+                id TEXT PRIMARY KEY,
+                resume_id TEXT NOT NULL,
+                job_description TEXT NOT NULL,
+                match_score INTEGER NOT NULL,
+                matched_keywords TEXT NOT NULL,
+                missing_keywords TEXT NOT NULL,
+                approved_additions TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (resume_id) REFERENCES resumes (id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS generated_files (
+                id TEXT PRIMARY KEY,
+                resume_id TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                generated_text TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (resume_id) REFERENCES resumes (id)
+            )
+            """
+        )
+        migrate_db(fallback)
+        fallback.commit()
+        fallback.close()
 
 
 def now_iso():
@@ -927,7 +982,10 @@ def home():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    payload = {"status": "ok"}
+    if DB_INIT_ERROR:
+        payload["database_warning"] = DB_INIT_ERROR
+    return jsonify(payload)
 
 
 @app.route("/upload", methods=["POST"])

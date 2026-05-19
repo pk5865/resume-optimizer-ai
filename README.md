@@ -41,6 +41,7 @@ Use:
 - Root directory: `backend`
 - Build command: `pip install -r requirements.txt`
 - Start command: `gunicorn app:app`
+- Start command: `gunicorn --bind 0.0.0.0:$PORT app:app`
 
 Set this environment variable in Render:
 
