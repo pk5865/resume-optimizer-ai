@@ -24,26 +24,24 @@ npm run dev
 
 ## Free Deployment Setup
 
-Recommended split:
+Recommended free setup:
 
 1. Frontend on [Vercel](https://vercel.com)
-2. Backend on [Render](https://render.com)
+2. Backend on [Vercel](https://vercel.com) under `/api`
 3. Database on a free hosted Postgres service such as [Supabase](https://supabase.com)
 
 ### Why not local SQLite on Render?
 
 Render free web services use ephemeral disk, so local SQLite files can be lost when the service restarts or redeploys. For saved history and generated resume records, use a hosted database instead.
 
-### Backend on Render
+### Backend on Vercel
 
 Use:
 
-- Root directory: `backend`
-- Build command: `pip install -r requirements.txt`
-- Start command: `gunicorn app:app`
-- Start command: `gunicorn --bind 0.0.0.0:$PORT app:app`
+- Root service entrypoint: `backend/app.py`
+- Route prefix: `/api`
 
-Set this environment variable in Render:
+Set this environment variable in Vercel:
 
 - `DATABASE_URL` = your hosted Postgres connection string
 
@@ -51,13 +49,13 @@ Set this environment variable in Render:
 
 Use:
 
-- Root directory: `frontend`
+- Root directory: repo root
 - Build command: `npm run build`
 - Output directory: `dist`
 
 Set this environment variable in Vercel:
 
-- `VITE_API_BASE_URL` = your Render backend URL
+- `VITE_API_BASE_URL` = `/api` or leave empty to use the default
 
 ## Environment Examples
 

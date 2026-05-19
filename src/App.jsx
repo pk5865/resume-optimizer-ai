@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000';
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== 'undefined' && window.location.hostname === 'localhost'
+    ? 'http://127.0.0.1:5000'
+    : '/api');
 
 export default function App() {
   const [file, setFile] = useState(null);
