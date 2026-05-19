@@ -18,11 +18,11 @@ from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 from services.pdf_parser import extract_text
 
 try:
-    import psycopg
-    from psycopg.rows import dict_row
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
 except Exception:  # pragma: no cover - optional dependency for local dev
-    psycopg = None
-    dict_row = None
+    psycopg2 = None
+    RealDictCursor = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "app.db")
@@ -116,9 +116,9 @@ CORS(app)
 
 def get_db():
     if DATABASE_URL:
-        if psycopg is None:
-            raise RuntimeError("psycopg is required when DATABASE_URL is set")
-        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2 is required when DATABASE_URL is set")
+        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
