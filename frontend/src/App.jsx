@@ -129,7 +129,7 @@ export default function App() {
             <h1>Upload resume, paste job description, generate a better version.</h1>
             <p className="sub">
               Honest resume tailoring with permission-based additions, match scoring,
-              and downloadable DOCX/PDF output.
+              and downloadable PDF output.
             </p>
           </div>
           <a className="ghost" href={`${API_BASE}/health`} target="_blank" rel="noreferrer">

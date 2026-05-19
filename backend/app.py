@@ -1,12 +1,13 @@
+import io
 import os
 import re
 import sqlite3
 import uuid
+import tempfile
 from datetime import datetime
 from xml.sax.saxutils import escape
 
 import fitz
-from docx import Document
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from reportlab.lib import colors
@@ -16,10 +17,16 @@ from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
 from services.pdf_parser import extract_text
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover - optional dependency for local dev
+    psycopg = None
+    dict_row = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-GENERATED_FOLDER = os.path.join(BASE_DIR, "generated")
 DB_PATH = os.path.join(BASE_DIR, "app.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 URL_RE = re.compile(r"(https?://[^\s<>\"]+)")
 MAX_PDF_PAGES = 1
 
@@ -106,14 +113,33 @@ ACHIEVEMENT_PATTERNS = [
 app = Flask(__name__)
 CORS(app)
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(GENERATED_FOLDER, exist_ok=True)
-
 
 def get_db():
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError("psycopg is required when DATABASE_URL is set")
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_column(conn, table_name, column_name, column_sql):
+    if DATABASE_URL:
+        cur = conn.cursor()
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_sql}")
+        return
+
+    cur = conn.cursor()
+    existing = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+    column_names = {row[1] for row in existing}
+    if column_name not in column_names:
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def migrate_db(conn):
+    ensure_column(conn, "generated_files", "generated_text", "TEXT NOT NULL DEFAULT ''")
 
 
 def init_db():
@@ -151,11 +177,13 @@ def init_db():
             resume_id TEXT NOT NULL,
             file_type TEXT NOT NULL,
             file_path TEXT NOT NULL,
+            generated_text TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             FOREIGN KEY (resume_id) REFERENCES resumes (id)
         )
         """
     )
+    migrate_db(conn)
     conn.commit()
     conn.close()
 
@@ -632,20 +660,12 @@ def build_tailored_resume(raw_text, job_description, approved_additions):
     return "\n".join(output).strip()
 
 
-def save_docx(text, output_path):
-    doc = Document()
-    for line in text.split("\n"):
-        doc.add_paragraph(line)
-    doc.save(output_path)
-    return output_path
-
-
-def pdf_page_count(pdf_path):
-    with fitz.open(pdf_path) as doc:
+def pdf_page_count(pdf_bytes):
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         return doc.page_count
 
 
-def save_pdf(text, output_path):
+def build_pdf_bytes(text):
     lines = [line.rstrip() for line in text.splitlines()]
     non_empty = [line for line in lines if line.strip()]
 
@@ -836,12 +856,11 @@ def save_pdf(text, output_path):
 
         return story
 
+    last_pdf = b""
     for profile in fit_profiles:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
+        buffer = io.BytesIO()
         doc = SimpleDocTemplate(
-            output_path,
+            buffer,
             pagesize=A4,
             leftMargin=profile["left"],
             rightMargin=profile["right"],
@@ -850,55 +869,35 @@ def save_pdf(text, output_path):
         )
         story = build_story(profile)
         doc.build(story)
+        pdf_bytes = buffer.getvalue()
+        last_pdf = pdf_bytes
 
-        if pdf_page_count(output_path) <= MAX_PDF_PAGES:
-            return output_path
+        if pdf_page_count(pdf_bytes) <= MAX_PDF_PAGES:
+            return pdf_bytes
 
-    return output_path
+    return last_pdf
 
 
 def remove_existing_generated_files(session_id):
-    base_name = f"{session_id}_optimized_resume"
     conn = get_db()
-    rows = conn.execute(
-        "SELECT file_path FROM generated_files WHERE resume_id = ?",
-        (session_id,)
-    ).fetchall()
     conn.execute("DELETE FROM generated_files WHERE resume_id = ?", (session_id,))
     conn.commit()
     conn.close()
-
-    for row in rows:
-        file_path = row["file_path"]
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-
-    for suffix in (".docx", ".pdf"):
-        file_path = os.path.join(GENERATED_FOLDER, base_name + suffix)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-
-def clear_previous_data():
-    conn = get_db()
-    conn.execute("DELETE FROM generated_files")
-    conn.execute("DELETE FROM analyses")
-    conn.execute("DELETE FROM resumes")
-    conn.commit()
-    conn.close()
-
-    for folder in (UPLOAD_FOLDER, GENERATED_FOLDER):
-        if not os.path.isdir(folder):
-            continue
-        for name in os.listdir(folder):
-            path = os.path.join(folder, name)
-            if os.path.isfile(path):
-                os.remove(path)
 
 
 def get_resume_or_404(resume_id):
     conn = get_db()
     row = conn.execute("SELECT * FROM resumes WHERE id = ?", (resume_id,)).fetchone()
+    conn.close()
+    return row
+
+
+def get_generated_resume_or_404(session_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM generated_files WHERE resume_id = ? AND file_type = 'pdf' ORDER BY created_at DESC LIMIT 1",
+        (session_id,)
+    ).fetchone()
     conn.close()
     return row
 
@@ -938,14 +937,17 @@ def upload():
         return jsonify({"error": "Please upload a PDF file"}), 400
 
     try:
-        clear_previous_data()
-
         session_id = str(uuid.uuid4())
-        safe_name = f"{session_id}_{file.filename}"
-        path = os.path.join(UPLOAD_FOLDER, safe_name)
-        file.save(path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            temp_path = tmp.name
+            file.save(temp_path)
 
-        raw_text = extract_text(path)
+        try:
+            raw_text = extract_text(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
         if not raw_text.strip():
             raw_text = ""
 
@@ -1017,7 +1019,6 @@ def rewrite():
     approved_additions = data.get("approved_additions", [])
     remove_terms = data.get("remove_terms", [])
     confirm_removals = bool(data.get("confirm_removals", False))
-    output_format = (data.get("output_format") or "docx").lower()
 
     resume_row = get_resume_or_404(session_id)
     if not resume_row:
@@ -1040,22 +1041,16 @@ def rewrite():
     )
 
     remove_existing_generated_files(session_id)
-
-    base_name = f"{session_id}_optimized_resume"
-    docx_path = os.path.join(GENERATED_FOLDER, base_name + ".docx")
-    pdf_path = os.path.join(GENERATED_FOLDER, base_name + ".pdf")
-
-    save_docx(rewritten_text, docx_path)
-    save_pdf(rewritten_text, pdf_path)
+    pdf_bytes = build_pdf_bytes(rewritten_text)
+    if pdf_page_count(pdf_bytes) > MAX_PDF_PAGES:
+        return jsonify({
+            "error": "Generated resume still exceeds one page."
+        }), 400
 
     conn = get_db()
     conn.execute(
-        "INSERT INTO generated_files (id, resume_id, file_type, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), session_id, "docx", docx_path, now_iso())
-    )
-    conn.execute(
-        "INSERT INTO generated_files (id, resume_id, file_type, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), session_id, "pdf", pdf_path, now_iso())
+        "INSERT INTO generated_files (id, resume_id, file_type, file_path, generated_text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), session_id, "pdf", "", rewritten_text, now_iso())
     )
     conn.commit()
     conn.close()
@@ -1065,9 +1060,7 @@ def rewrite():
         "resume_rule": "Original resume content was preserved. Only approved additions were appended.",
         "removed_lines": removed_lines,
         "needs_removal": False,
-        "generated_files": ["docx", "pdf"],
         "rewritten_text": rewritten_text,
-        "download_docx": f"/download/{session_id}?format=docx",
         "download_pdf": f"/download/{session_id}?format=pdf",
         "preview_pdf": f"/preview/{session_id}"
     })
@@ -1075,30 +1068,35 @@ def rewrite():
 
 @app.route("/download/<session_id>")
 def download(session_id):
-    file_format = request.args.get("format", "docx").lower()
-    if file_format not in {"docx", "pdf"}:
+    file_format = request.args.get("format", "pdf").lower()
+    if file_format != "pdf":
         return jsonify({"error": "Invalid format"}), 400
 
-    suffix = ".docx" if file_format == "docx" else ".pdf"
-    file_path = os.path.join(GENERATED_FOLDER, f"{session_id}_optimized_resume{suffix}")
-    if not os.path.exists(file_path):
+    generated = get_generated_resume_or_404(session_id)
+    if not generated:
         return jsonify({"error": "File not found"}), 404
 
-    mimetype = (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        if file_format == "docx"
-        else "application/pdf"
+    pdf_bytes = build_pdf_bytes(generated["generated_text"])
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        as_attachment=True,
+        download_name="optimized_resume.pdf",
+        mimetype="application/pdf",
     )
-    return send_file(file_path, as_attachment=True, mimetype=mimetype)
 
 
 @app.route("/preview/<session_id>")
 def preview(session_id):
-    file_path = os.path.join(GENERATED_FOLDER, f"{session_id}_optimized_resume.pdf")
-    if not os.path.exists(file_path):
+    generated = get_generated_resume_or_404(session_id)
+    if not generated:
         return jsonify({"error": "File not found"}), 404
 
-    response = send_file(file_path, mimetype="application/pdf", as_attachment=False)
+    pdf_bytes = build_pdf_bytes(generated["generated_text"])
+    response = send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=False,
+    )
     response.headers["Content-Disposition"] = "inline"
     return response
 
