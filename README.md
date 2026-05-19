@@ -66,4 +66,4 @@ Set this environment variable in Vercel:
 
 - The backend now returns PDF output only.
 - The app keeps runtime-generated resume history in the database instead of local generated files.
-- If `DATABASE_URL` is not set, the backend falls back to local SQLite for development only.
+- If `DATABASE_URL` is not set, the backend falls back to temporary SQLite storage for local/serverless runtime compatibility.

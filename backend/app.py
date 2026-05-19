@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional dependency for local dev
     RealDictCursor = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "app.db")
+DB_PATH = os.path.join(tempfile.gettempdir(), "resume_optimizer_ai.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 URL_RE = re.compile(r"(https?://[^\s<>\"]+)")
 MAX_PDF_PAGES = 1
