@@ -12,27 +12,21 @@ export default function App() {
   const [suggestedAdditions, setSuggestedAdditions] = useState([]);
   const [approvedAdditions, setApprovedAdditions] = useState([]);
   const [rewrittenText, setRewrittenText] = useState('');
-  const [downloadDocx, setDownloadDocx] = useState('');
   const [downloadPdf, setDownloadPdf] = useState('');
   const [previewPdf, setPreviewPdf] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [generated, setGenerated] = useState(false);
-  const [removalSuggestions, setRemovalSuggestions] = useState([]);
-  const [selectedRemovals, setSelectedRemovals] = useState([]);
 
   const selectedAdditionSet = useMemo(() => new Set(approvedAdditions), [approvedAdditions]);
-  const selectedRemovalSet = useMemo(() => new Set(selectedRemovals), [selectedRemovals]);
 
   const uploadResume = async () => {
     setError('');
     setGenerated(false);
+    setAnalysis(null);
     setRewrittenText('');
-    setDownloadDocx('');
     setDownloadPdf('');
     setPreviewPdf('');
-    setRemovalSuggestions([]);
-    setSelectedRemovals([]);
     if (!file) {
       setError('Please choose a PDF resume.');
       return;
@@ -47,7 +41,10 @@ export default function App() {
       setSuggestedAdditions(res.data.detected_keywords || []);
       setApprovedAdditions([]);
     } catch (err) {
-      setError(err?.response?.data?.error || 'Upload failed');
+      const message = err?.response?.data?.details
+        ? `${err?.response?.data?.error || 'Upload failed'}: ${err.response.data.details}`
+        : err?.response?.data?.error || err?.message || 'Upload failed';
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -56,8 +53,6 @@ export default function App() {
   const analyzeResume = async () => {
     setError('');
     setGenerated(false);
-    setRemovalSuggestions([]);
-    setSelectedRemovals([]);
     if (!sessionId) {
       setError('Upload a resume first.');
       return;
@@ -94,26 +89,14 @@ export default function App() {
         session_id: sessionId,
         job_description: jobDescription,
         approved_additions: approvedAdditions.filter(Boolean),
-        remove_terms: selectedRemovals,
-        confirm_removals: selectedRemovals.length > 0,
+        remove_terms: [],
+        confirm_removals: false,
         output_format: 'both',
       });
-      if (res.data.needs_removal) {
-        setRemovalSuggestions(res.data.suggested_removals || []);
-        setError(res.data.message || 'Please remove some content.');
-        setRewrittenText('');
-        setDownloadDocx('');
-        setDownloadPdf('');
-        setPreviewPdf('');
-        setGenerated(false);
-      } else {
-        setRemovalSuggestions([]);
-        setRewrittenText(res.data.rewritten_text || '');
-        setDownloadDocx(`${API_BASE}${res.data.download_docx}`);
-        setDownloadPdf(`${API_BASE}${res.data.download_pdf}`);
-        setPreviewPdf(`${API_BASE}${res.data.preview_pdf}`);
-        setGenerated(true);
-      }
+      setRewrittenText(res.data.rewritten_text || '');
+      setDownloadPdf(`${API_BASE}${res.data.download_pdf}`);
+      setPreviewPdf(`${API_BASE}${res.data.preview_pdf}`);
+      setGenerated(true);
     } catch (err) {
       setError(err?.response?.data?.error || 'Rewrite failed');
     } finally {
@@ -123,14 +106,6 @@ export default function App() {
 
   const toggleAddition = (item) => {
     setApprovedAdditions((current) =>
-      current.includes(item)
-        ? current.filter((x) => x !== item)
-        : [...current, item]
-    );
-  };
-
-  const toggleRemoval = (item) => {
-    setSelectedRemovals((current) =>
       current.includes(item)
         ? current.filter((x) => x !== item)
         : [...current, item]
@@ -232,40 +207,12 @@ export default function App() {
           </section>
         )}
 
-        {removalSuggestions.length > 0 && (
-          <section className="panel">
-            <h2>One Page Fit</h2>
-            <p>
-              The resume is still too long for one A4 page. Choose what can be removed,
-              then regenerate. Nothing is removed until you approve it.
-            </p>
-            <div className="chips">
-              {removalSuggestions.map((item) => (
-                <button
-                  key={item}
-                  className={selectedRemovalSet.has(item) ? 'chip active' : 'chip'}
-                  onClick={() => toggleRemoval(item)}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-            <p className="meta">Selected removals: {selectedRemovals.length || 0}</p>
-            <div className="row">
-              <button onClick={rewriteResume} disabled={busy || !sessionId}>
-                Regenerate One-Page PDF
-              </button>
-            </div>
-          </section>
-        )}
-
         {rewrittenText && (
           <section className="panel">
             <h2>4. Rewritten Resume Preview</h2>
             {generated && <p className="meta">Resume generated successfully. Download below.</p>}
             <pre className="preview large">{rewrittenText}</pre>
             <div className="row">
-              <a className="download" href={downloadDocx}>Download DOCX</a>
               <a className="download alt" href={downloadPdf}>Download PDF</a>
               <button className="secondary" onClick={openPdf} disabled={!previewPdf}>
                 Open PDF
